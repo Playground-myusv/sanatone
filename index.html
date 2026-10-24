@@ -1134,11 +1134,11 @@
                     Coimbatore
                 </p>
 
-                <a href="https://maps.app.goo.gl/a2Y22xsbsAUCor8B9?g_st=iw"
+                <a href="https://www.google.com/maps/search/?api=1&amp;query=Le%20M%C3%A9ridien%20Coimbatore%2C%20762%20Avinashi%20Road%2C%20Neelambur%2C%20Tamil%20Nadu%20641048"
                    target="_blank"
                    rel="noopener noreferrer"
                    class="portkey-btn font-cinzel text-xs uppercase tracking-wider" aria-label="Open Emerald Hall in Google Maps">
-                    <span>🧭 Tap for Google Maps Portkey ✨</span>
+                    <span>📍 Open Location in Google Maps</span>
                 </a>
             </div>
 
@@ -1181,12 +1181,11 @@
             if (!audioCtx) {
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                 if (AudioContextClass) {
-                    audioCtx = new AudioContextClass();
+                    try { audioCtx = new AudioContextClass(); }
+                    catch (e) { console.warn('Audio unavailable:', e); }
                 }
             }
-            if (audioCtx && audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
+            return audioCtx;
         }
 
         function playCelestaNote(freq, duration = 0.6, delay = 0, volume = 0.08) {
@@ -1217,47 +1216,63 @@
             });
         }
 
+        let audioStarted = false;
         function startAmbientMelody() {
+            // Start ONLY after the audio context has truly entered the running state.
+            if (!audioCtx || audioCtx.state !== 'running' || isMuted || audioStarted) return;
             audioStarted = true;
-            initAudio();
             if (melodyInterval) clearInterval(melodyInterval);
-
             const triggerPhrase = () => {
-                if (isMuted) return;
+                if (isMuted || !audioCtx || audioCtx.state !== 'running') return;
                 let offset = 0;
                 melodyNotes.forEach(note => {
-                    playCelestaNote(note.freq, note.dur * 1.4, offset, 0.055);
+                    playCelestaNote(note.freq, note.dur * 1.4, offset, 0.075);
                     offset += note.dur;
                 });
             };
-
             triggerPhrase();
             melodyInterval = setInterval(triggerPhrase, 7500);
+            refreshMusicButton();
         }
-
-        let audioStarted = false;
-        function startMusicIfAllowed() {
+        function refreshMusicButton() {
+            const audible = !isMuted && !!audioCtx && audioCtx.state === 'running';
+            document.getElementById('audio-icon').textContent = audible ? '🔔' : '🔕';
+            document.getElementById('audio-toggle').setAttribute('aria-label', audible ? 'Mute music' : 'Turn music on');
+            document.getElementById('audio-toggle').title = audible ? 'Mute music' : 'Tap to enable music';
+        }
+        async function startMusicIfAllowed() {
             if (isMuted) return;
-            initAudio();
-            if (!audioCtx) return;
-            if (audioCtx.state === 'running' && !audioStarted) {
-                audioStarted = true;
-                startAmbientMelody();
+            const context = initAudio();
+            if (!context) return;
+            try {
+                // On iOS/Android this usually succeeds only during a real user gesture.
+                if (context.state === 'suspended') await context.resume();
+                if (context.state === 'running') startAmbientMelody();
+            } catch (error) {
+                // Silent autoplay was blocked; retry on first actual guest interaction.
+                console.info('Music will start on interaction:', error);
+            } finally {
+                refreshMusicButton();
             }
         }
+        // Request autoplay once, then unlock playback on the earliest tap or keypress.
         window.addEventListener('load', startMusicIfAllowed);
         document.addEventListener('pointerdown', startMusicIfAllowed, {passive:true});
+        document.addEventListener('touchstart', startMusicIfAllowed, {passive:true});
         document.addEventListener('keydown', startMusicIfAllowed);
-        document.getElementById('audio-toggle').addEventListener('click', () => {
+        document.getElementById('audio-toggle').addEventListener('click', async () => {
             isMuted = !isMuted;
-            document.getElementById('audio-icon').textContent = isMuted ? '🔕' : '🔔';
-            document.getElementById('audio-toggle').setAttribute('aria-label', isMuted ? 'Turn music on' : 'Mute music');
-            if (!isMuted) {
+            if (isMuted) {
+                if (melodyInterval) { clearInterval(melodyInterval); melodyInterval = null; }
                 audioStarted = false;
-                startMusicIfAllowed();
-                playSparkleChime();
+                if (audioCtx && audioCtx.state === 'running') await audioCtx.suspend();
+            } else {
+                await startMusicIfAllowed();
+                if (audioCtx && audioCtx.state === 'running') playSparkleChime();
             }
+            refreshMusicButton();
         });
+        refreshMusicButton();
 
         /* =====================================================
            2. STARRY SKY & GOLDEN SPARKLE PARTICLE ENGINE
@@ -1435,7 +1450,7 @@
             cancelAdvance(); currentStep = 'opening';
             const rect = waxSealBtn.getBoundingClientRect();
             spawnSparkleBurst(rect.left + rect.width/2, rect.top + rect.height/2, 42);
-            startAmbientMelody(); playSparkleChime();
+            startMusicIfAllowed(); playSparkleChime();
             waxSealBtn.classList.add('cracked');
             sceneEnvelope.classList.add('letter-opened');
             sealPrompt.style.opacity = '0';
