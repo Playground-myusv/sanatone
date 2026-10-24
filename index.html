@@ -808,6 +808,9 @@
 @keyframes keysLoad{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 @media(prefers-reduced-motion:reduce){.flying-key{animation:none;opacity:1;top:38%;left:30%;transform:scale(.65)}.flying-key:not(.hero-key){display:none}.flying-key .wing{animation:none}.keys-progress span{animation:keysLoad 5s linear both}}
 
+
+
+
     </style>
 </head>
 <body>
@@ -1162,8 +1165,10 @@
     <script>
         /* Built-in magical music-box soundtrack; no external audio file required. */
         let audioCtx = null;
+        let musicMasterGain = null;
         let isMuted = false;
         let melodyInterval = null;
+        const BASE_MUSIC_VOLUME = 1.45; // stronger but controlled master level
 
         // Gentle music-box notes inspired by a magical owl-post melody
         const melodyNotes = [
@@ -1181,20 +1186,30 @@
             if (!audioCtx) {
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                 if (AudioContextClass) {
-                    try { audioCtx = new AudioContextClass(); }
-                    catch (e) { console.warn('Audio unavailable:', e); }
+                    try {
+                        audioCtx = new AudioContextClass();
+                        musicMasterGain = audioCtx.createGain();
+                        musicMasterGain.gain.value = BASE_MUSIC_VOLUME;
+                        musicMasterGain.connect(audioCtx.destination);
+                        audioCtx.addEventListener('statechange', () => {
+                            if (audioCtx.state === 'running' && !isMuted) startAmbientMelody();
+                            refreshMusicButton();
+                        });
+                    } catch (e) {
+                        console.warn('Audio unavailable:', e);
+                    }
                 }
             }
             return audioCtx;
         }
 
-        function playCelestaNote(freq, duration = 0.6, delay = 0, volume = 0.08) {
-            if (isMuted || !audioCtx) return;
+        function playCelestaNote(freq, duration = 0.6, delay = 0, volume = 0.11) {
+            if (isMuted || !audioCtx || !musicMasterGain) return;
             const startTime = audioCtx.currentTime + delay;
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
 
-            osc.type = 'sine';
+            osc.type = 'triangle';
             osc.frequency.setValueAtTime(freq, startTime);
 
             gain.gain.setValueAtTime(0.0001, startTime);
@@ -1202,7 +1217,7 @@
             gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
 
             osc.connect(gain);
-            gain.connect(audioCtx.destination);
+            gain.connect(musicMasterGain);
 
             osc.start(startTime);
             osc.stop(startTime + duration + 0.05);
@@ -1212,13 +1227,13 @@
             initAudio();
             const chimeFreqs = [587.33, 783.99, 987.77, 1174.66, 1567.98];
             chimeFreqs.forEach((f, idx) => {
-                playCelestaNote(f, 0.55, idx * 0.07, 0.06);
+                playCelestaNote(f, 0.55, idx * 0.07, 0.12);
             });
         }
 
         let audioStarted = false;
         function startAmbientMelody() {
-            // Start ONLY after the audio context has truly entered the running state.
+            // Start only after the audio context is truly running.
             if (!audioCtx || audioCtx.state !== 'running' || isMuted || audioStarted) return;
             audioStarted = true;
             if (melodyInterval) clearInterval(melodyInterval);
@@ -1226,7 +1241,7 @@
                 if (isMuted || !audioCtx || audioCtx.state !== 'running') return;
                 let offset = 0;
                 melodyNotes.forEach(note => {
-                    playCelestaNote(note.freq, note.dur * 1.4, offset, 0.075);
+                    playCelestaNote(note.freq, note.dur * 1.4, offset, 0.19);
                     offset += note.dur;
                 });
             };
@@ -1235,40 +1250,76 @@
             refreshMusicButton();
         }
         function refreshMusicButton() {
-            const audible = !isMuted && !!audioCtx && audioCtx.state === 'running';
-            document.getElementById('audio-icon').textContent = audible ? '🔔' : '🔕';
-            document.getElementById('audio-toggle').setAttribute('aria-label', audible ? 'Mute music' : 'Turn music on');
-            document.getElementById('audio-toggle').title = audible ? 'Mute music' : 'Tap to enable music';
+            // 🔕 means the guest explicitly muted sound, NOT that browser autoplay is blocked.
+            const button = document.getElementById('audio-toggle');
+            document.getElementById('audio-icon').textContent = isMuted ? '🔕' : '🔔';
+            button.setAttribute('aria-label', isMuted ? 'Turn music on' : 'Mute music');
+            button.title = isMuted ? 'Turn music on' : 'Mute music';
         }
-        async function startMusicIfAllowed() {
-            if (isMuted) return;
+        let resumeInFlight = null;
+        function startMusicIfAllowed() {
+            if (isMuted) return Promise.resolve(false);
             const context = initAudio();
-            if (!context) return;
-            try {
-                // On iOS/Android this usually succeeds only during a real user gesture.
-                if (context.state === 'suspended') await context.resume();
-                if (context.state === 'running') startAmbientMelody();
-            } catch (error) {
-                // Silent autoplay was blocked; retry on first actual guest interaction.
-                console.info('Music will start on interaction:', error);
-            } finally {
-                refreshMusicButton();
+            if (!context) return Promise.resolve(false);
+            if (context.state === 'running') {
+                startAmbientMelody();
+                return Promise.resolve(true);
             }
+            if (!resumeInFlight) {
+                // Browser requires user activation on many phones; call resume synchronously
+                // from the actual gesture rather than after awaiting other work.
+                try {
+                    resumeInFlight = Promise.resolve(context.resume())
+                        .then(() => {
+                            if (context.state === 'running' && !isMuted) {
+                                startAmbientMelody();
+                                return true;
+                            }
+                            return false;
+                        })
+                        .catch(() => false)
+                        .finally(() => { resumeInFlight = null; refreshMusicButton(); });
+                } catch (error) { resumeInFlight = null; return Promise.resolve(false); }
+            }
+            return resumeInFlight;
         }
-        // Request autoplay once, then unlock playback on the earliest tap or keypress.
+        // Never hold up the flying keys intro for sound permission.
+        // Ask the browser immediately, again when visible, and on the first ordinary gesture.
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', startMusicIfAllowed, {once:true});
+        } else { startMusicIfAllowed(); }
         window.addEventListener('load', startMusicIfAllowed);
-        document.addEventListener('pointerdown', startMusicIfAllowed, {passive:true});
-        document.addEventListener('touchstart', startMusicIfAllowed, {passive:true});
-        document.addEventListener('keydown', startMusicIfAllowed);
-        document.getElementById('audio-toggle').addEventListener('click', async () => {
-            isMuted = !isMuted;
+        window.addEventListener('pageshow', startMusicIfAllowed);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) startMusicIfAllowed();
+        });
+        document.addEventListener('pointerdown', (event) => {
+            if (!event.target.closest('#audio-toggle')) {
+                if (audioCtx?.state === 'suspended') { try { audioCtx.resume(); } catch (_) {} }
+                startMusicIfAllowed();
+            }
+        }, {capture:true, passive:true});
+        document.addEventListener('touchstart', (event) => {
+            if (!event.target.closest('#audio-toggle')) {
+                if (audioCtx?.state === 'suspended') { try { audioCtx.resume(); } catch (_) {} }
+                startMusicIfAllowed();
+            }
+        }, {capture:true, passive:true});
+        document.addEventListener('keydown', startMusicIfAllowed, {capture:true});
+
+        document.getElementById('audio-toggle').addEventListener('click', () => {
             if (isMuted) {
+                isMuted = false;
+                if (musicMasterGain) musicMasterGain.gain.value = BASE_MUSIC_VOLUME;
+                startMusicIfAllowed().then(playing => { if (playing) playSparkleChime(); });
+            } else if (audioCtx && audioCtx.state === 'running') {
+                isMuted = true;
                 if (melodyInterval) { clearInterval(melodyInterval); melodyInterval = null; }
                 audioStarted = false;
-                if (audioCtx && audioCtx.state === 'running') await audioCtx.suspend();
+                audioCtx.suspend().catch(() => {});
             } else {
-                await startMusicIfAllowed();
-                if (audioCtx && audioCtx.state === 'running') playSparkleChime();
+                // Audio was already requested but blocked; try to unlock it on this tap.
+                startMusicIfAllowed().then(playing => { if (playing) playSparkleChime(); });
             }
             refreshMusicButton();
         });
@@ -1503,7 +1554,9 @@
             document.getElementById('flying-keys-intro').classList.add('finished');
             if (currentStep==='intro') armAdvance('seal',openLetter);
         }
-        window.setTimeout(showOpening,5000);
+        // Start the five-second flying keys intro immediately; never wait for sound permission.
+        window.setTimeout(showOpening, 5000);
+
 
 
         // SCENE 3: Automatic Golden Snitch Choreography (One block every 1.5 seconds)
